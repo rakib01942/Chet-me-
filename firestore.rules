@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- Global Denial ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isAdmin() { return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.badge == 'ADMIN'; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // --- Validation Blueprints ---
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() == 8 &&
+             data.displayName is string && data.displayName.size() <= 50 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidChat(data) {
+      return data.type in ['individual', 'group'] &&
+             data.participants is list && data.participants.size() >= 2 &&
+             data.participantAuthIds is list && data.participantAuthIds.size() >= 2;
+    }
+
+    function isValidMessage(data) {
+      return data.text is string && data.text.size() <= 2000 &&
+             data.senderId is string && data.senderAuthId == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow read: if isSignedIn(); 
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if (isOwner(userId) || isAdmin()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['bio', 'photoURL', 'isPublic', 'uidPrivacy', 'lastSeen', 'badge', 'bannedUntil', 'isPermanentlyBanned'])
+      );
+    }
+
+    match /chats/{chatId} {
+      allow read: if isSignedIn() && (request.auth.uid in resource.data.participantAuthIds || isAdmin());
+      allow create: if isSignedIn() && isValidChat(incoming()) && request.auth.uid in incoming().participantAuthIds;
+      allow update: if isSignedIn() && request.auth.uid in existing().participantAuthIds && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'lastMessageTime'])
+      );
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantAuthIds || isAdmin());
+        allow create: if isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantAuthIds && isValidMessage(incoming());
+      }
+    }
+
+    match /stories/{storyId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && incoming().userAuthId == request.auth.uid && incoming().createdAt == request.time;
+      allow delete: if isSignedIn() && (existing().userAuthId == request.auth.uid || isAdmin());
+    }
+
+    match /calls/{callId} {
+       allow read, create: if isSignedIn();
+    }
+
+    match /notices/{noticeId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /friendRequests/{requestId} {
+      allow read, create, update: if isSignedIn();
+    }
+  }
+}
